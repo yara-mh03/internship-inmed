@@ -14,11 +14,11 @@ np.random.seed(42)
 # Load one session
 # ----------------
 
-file_name = "C:/Users/HP/Desktop/M1 Stage - Inmed/SiliconProbeData/FixedDelayTask/HI125_022817_units.mat"
+file_name = "/HI125_022817_units.mat"
 session_name = os.path.splitext(os.path.basename(file_name))[0]  # e.g. "HI127_031517_units"
 plot_counter = 0
 
-output_dir = r"C:/Users/HP/Desktop/M1 Stage - Inmed/SSM Results/No Stimulation"
+output_dir = r""
 os.makedirs(output_dir, exist_ok=True)   # creates the folder if it doesn't exist
 
 data = scipy.io.loadmat(file_name, struct_as_record=False, squeeze_me=True)
@@ -178,9 +178,7 @@ k_range = range(2, 11)
 # ----------------------------------------------------------------
 
 N_RESTARTS = 5       # used for the main k=2..10 fits — these drive all downstream plots/diagnostics, worth the cost
-N_RESTARTS_CV = 2    # used inside CV loops only — fold noise (~0.7-1.1 LL/bin) already dwarfs
-                      # what extra restarts would buy here, so 2 is enough to avoid a truly
-                      # unlucky local optimum without ~2.5x-ing the CV runtime
+N_RESTARTS_CV = 2    # used inside CV loops only, 2 is enough to avoid a bad local optimum 
 
 
 def fit_hmm_with_restarts(data, k, n_units, n_restarts=N_RESTARTS, num_iters=100):
@@ -223,18 +221,17 @@ for k in k_range:
 # ----------------------------------------------------------------
 # Standard k-fold CV, trials shuffled before splitting.
 #
-# How the shuffling works (confirmed and verified separately): X_list is a
-# plain Python list of whole trial matrices, each shaped (n_bins, n_units).
+# How the shuffling works: 
+# X_list is a plain Python list of whole trial matrices, each shaped (n_bins, n_units).
 # KFold.split(X_list) only ever sees len(X_list) = n_trials — it has no
 # visibility into what's inside each element, so shuffling can only permute
 # WHICH whole trials land in train vs test. It cannot touch bin order or
 # neuron order within a trial, since it never looks below the list's top
-# level. Each trial matrix comes out of a fold exactly as it went in.
+# level. 
 #
 # fit_hmm_with_restarts is reused inside the CV loop so CV models are
 # fitted consistently with the main fitting loop. num_iters=50 (vs 100 in
 # the main loop) and N_RESTARTS_CV (vs N_RESTARTS) keep runtime manageable
-# — CV fold-to-fold noise dwarfs what extra restarts would buy here.
 
 n_folds = 5
 
@@ -297,119 +294,6 @@ for k in list(k_range)[:-1]:
     print(f"  {k:2d} -> {k_next:2d}   {delta:15.4f} {combined_std:14.4f} {'yes' if is_sig else 'no':>13s}")
 
 print(f"\nLast k significant: k={last_significant_k}")
-
-# ----------------------------------------------------------------
-# Split-half stability check: do states/emission profiles hold up
-# when fit independently on different trials?
-# ----------------------------------------------------------------
-# The CV above answers "is k well-supported by held-out likelihood?"
-# It does NOT check whether the STATES THEMSELVES are stable -- i.e.
-# whether fitting on different trials recovers the same underlying
-# firing patterns. This does that directly: split trials 50/50 (train
-# half vs test half), fit independently on each half, and compare
-# emission profiles (lambda vectors).
-#
-# State labels are arbitrary across independent EM fits (state 0 in
-# the train-half model has no reason to correspond to state 0 in the
-# test-half model), so raw index-to-index comparison would be
-# meaningless. States are matched first by cosine similarity of their
-# emission profiles (Hungarian / linear-sum-assignment matching, which
-# finds the pairing that maximizes total similarity), THEN compared.
-#
-# High matched similarity (close to 1.0) = the same firing patterns
-# emerge regardless of which trials you fit on -- real, stable
-# structure. Low similarity = the states are fitting something
-# closer to noise or trial-specific idiosyncrasy rather than a
-# population-wide pattern.
-
-STABILITY_SPLIT_SEED = 123
-
-half_A_idx, half_B_idx = train_test_split(
-    np.arange(len(X_list)), test_size=0.5, random_state=STABILITY_SPLIT_SEED, shuffle=True
-)
-half_A_data = [X_list[i] for i in half_A_idx]
-half_B_data = [X_list[i] for i in half_B_idx]
-
-print(f"\n--- Split-half stability check (train half n={len(half_A_idx)}, "
-      f"test half n={len(half_B_idx)}) ---")
-
-stability_summary = {}
-stability_lambdas = {}   # k -> (lam_A, lam_B, row_ind, col_ind, matched_sim)
-
-for k in k_range:
-    m_A, _ = fit_hmm_with_restarts(half_A_data, k, n_units, n_restarts=N_RESTARTS_CV, num_iters=50)
-    m_B, _ = fit_hmm_with_restarts(half_B_data, k, n_units, n_restarts=N_RESTARTS_CV, num_iters=50)
-
-    lam_A = np.exp(m_A.observations.log_lambdas)   # (k, n_units)
-    lam_B = np.exp(m_B.observations.log_lambdas)
-
-    norm_A = lam_A / (np.linalg.norm(lam_A, axis=1, keepdims=True) + 1e-12)
-    norm_B = lam_B / (np.linalg.norm(lam_B, axis=1, keepdims=True) + 1e-12)
-    sim = norm_A @ norm_B.T   # (k, k): sim[i, j] = cosine similarity of train-state i vs test-state j
-
-    row_ind, col_ind = linear_sum_assignment(-sim)   # maximize total matched similarity
-    matched_sim = sim[row_ind, col_ind]
-
-    stability_summary[k] = {
-        "mean_matched_sim": float(np.mean(matched_sim)),
-        "min_matched_sim": float(np.min(matched_sim)),
-    }
-    stability_lambdas[k] = (lam_A, lam_B, row_ind, col_ind, matched_sim)
-
-    print(f"  k={k}  mean matched cosine similarity = {stability_summary[k]['mean_matched_sim']:.3f}"
-          f"   min (weakest state) = {stability_summary[k]['min_matched_sim']:.3f}")
-
-# ---- Plot: split-half stability summary across k ----
-
-ks = list(k_range)
-mean_sims = [stability_summary[k]["mean_matched_sim"] for k in ks]
-min_sims  = [stability_summary[k]["min_matched_sim"] for k in ks]
-
-plt.figure(figsize=(8, 4.5))
-plt.plot(ks, mean_sims, "o-", color="seagreen", linewidth=2, markersize=7, label="mean matched similarity")
-plt.plot(ks, min_sims, "s--", color="crimson", linewidth=1.5, markersize=6, label="min matched similarity (weakest state)")
-plt.axhline(0.9, color="gray", linestyle=":", linewidth=1, label="0.9 reference")
-plt.xlabel("Number of HMM states (k)", fontsize=12)
-plt.ylabel("Cosine similarity\n(train-half vs test-half emission profiles)", fontsize=12)
-plt.title("Split-half stability of decoded states\n(independent 50/50 fits, states matched by emission similarity)", fontsize=12)
-plt.xticks(ks)
-plt.ylim(0, 1.02)
-plt.legend(fontsize=10)
-plt.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.savefig(os.path.join(output_dir, f"plot_{session_name}_{plot_counter}.png"), dpi=120, bbox_inches="tight")
-plt.close("all")
-plot_counter += 1
-
-# ---- Plot: emission profile overlay for the reported k ----
-# Solid = train-half fit, dashed = test-half fit, same color = matched pair.
-# If a state is stable, its two lines should nearly overlap.
-
-k_report = last_significant_k   # the k actually being carried forward / reported
-
-lam_A, lam_B, row_ind, col_ind, matched_sim = stability_lambdas[k_report]
-
-fig, ax = plt.subplots(figsize=(10, 4.5))
-colors_k = plt.cm.tab10(np.linspace(0, 1, k_report))
-for pos, (a_idx, b_idx, s) in enumerate(zip(row_ind, col_ind, matched_sim)):
-    ax.plot(lam_A[a_idx], color=colors_k[pos], linewidth=2, linestyle="-",
-            label=f"State {pos}  (sim={s:.2f})")
-    ax.plot(lam_B[b_idx], color=colors_k[pos], linewidth=2, linestyle="--")
-ax.set_xlabel("Neuron index", fontsize=11)
-ax.set_ylabel("\u03bb (expected spikes per bin)", fontsize=11)
-ax.set_title(f"Split-half emission profiles \u2014 k={k_report}\n"
-             "(solid = train half, dashed = test half, matched by state)", fontsize=12)
-ax.legend(fontsize=8, ncol=2, loc="upper right")
-ax.grid(True, alpha=0.3)
-ax.set_xlim(-0.5, n_units - 0.5)
-plt.tight_layout()
-plt.savefig(os.path.join(output_dir, f"plot_{session_name}_{plot_counter}.png"), dpi=120, bbox_inches="tight")
-plt.close("all")
-plot_counter += 1
-
-print(f"\nReported k = {k_report}: mean matched similarity = "
-      f"{stability_summary[k_report]['mean_matched_sim']:.3f}, "
-      f"min = {stability_summary[k_report]['min_matched_sim']:.3f}")
 
 # ----------------------------------------------------------------
 # Delta log-likelihood: LL(k) - LL(k-1), with elbow detection
