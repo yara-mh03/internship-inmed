@@ -17,7 +17,7 @@ to identify discrete population "states" across trials aligned to task events (s
    - Dwell-time, fragmentation, and effective-state diagnostics
 
 ## How to run
-Update the `file_name` and `output_dir` paths at the top of the script before running — they're currently hardcoded to a local machine.
+Update the `file_name` and `output_dir` paths at the top of the script before running.
 
 ## Requirements
 - Python 3.x
